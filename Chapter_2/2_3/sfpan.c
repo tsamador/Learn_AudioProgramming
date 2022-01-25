@@ -8,7 +8,7 @@ enum {
     ARG_PROGNAME,
     ARG_INFILE,
     ARG_OUTFILE,
-    ARG_PANPOS,
+    ARG_BRKFILE,
     ARG_NARGS
 };
 
@@ -25,6 +25,24 @@ pan_position simple_pan(double position)
     pos.left = position - 0.5;
     pos.right = position + 0.5;
 
+    return pos;
+}
+
+pan_position constpowerpan(double position)
+{
+    pan_position pos;
+    /* pi/2: 1/4 cycle of a sinusoid */
+    const double piover2 = 4.0 * atan(1.0) * 0.5;
+    const double root2over2 = sqrt(2.0) * 0.5;
+
+    /* scale position to fit the pi/2 range */
+    double thispos = position * piover2;
+
+    /* each channel uses a 1.4 of a cycle */
+    double angle = thispos * 0.5;
+
+    pos.left = root2over2 * (cos(angle) - sin(angle));
+    pos.right = root2over2 * (cos(angle) + sin(angle));
     return pos;
 }
 
@@ -78,22 +96,62 @@ int main(int argc, char* argv[])
     float amplitude_factor, scalefac;
     double pos, inpeak = 0.0;
 
-    printf("\nSFGAIN: Change level of soundfile\n");
+    double timeincr, sampletime;
+
+
+    FILE* fp = NULL;
+    unsigned long size;
+    breakpoint* points = NULL;
+    printf("\nSFPAN: Change level of soundfile\n");
 
     if(argc < ARG_NARGS)
     {
-        printf("insufficient arguments. \nusage: ./sf2float <infile> <outfile> <panpos>\n");
+        printf("insufficient arguments. \nusage: ./sf2float <infile> <outfile> <posfile.brk>\n");
         return 1;
     }
 
-    // Get the pan position from the command line
-    pos = (float) atof(argv[ARG_PANPOS]);
-    if(pos < -1.0 || pos > 1.0)
+    //Read breakpoint file and verify it 
+    fp = fopen(argv[ARG_BRKFILE], "r");
+
+    if(fp == NULL) 
     {
-        puts("Error: panpos value out of range -1 to +1\n");
+        printf("error: unable to pen breakpoint file %s\n", argv[ARG_BRKFILE]);
         error++;
         goto exit;
     }
+
+    points = get_breakpoints(fp, &size);
+
+    if(points == NULL)
+    {
+        printf("No breakpoints read. \n");
+        error++;
+        goto exit;
+    }  
+
+    if(size < 2) 
+    {
+        printf("Error: at least two breakpoints required\n");
+        free(points);
+        fclose(fp);
+        return 1;
+    }
+
+    //We require breakpoints to start from 0 */
+    if(points[0].time != 0.0) 
+    {
+        printf("error in breakpoint date, frist time must be 0.0\n");
+        error++;
+        goto exit;
+    }
+     if(!inrange(points, -1.0, 1.0, size))
+     {
+         printf("Error in breakpoint file, values out of range -1 to +1\n");
+         error++;
+         goto exit;
+     }
+
+
 
     //Initialize the library
     if(psf_init())
@@ -168,18 +226,24 @@ int main(int argc, char* argv[])
     */
     framesread = psf_sndReadFloatFrames(ifd, frame, FRAMES_PER_WRITE);
     totalread = 0;
-    
-    thispos = simple_pan(pos);
+
+    timeincr = 1.0 / inprops.srate;
+    sampletime = 0.0;
 
     while(framesread > 0){
 
         int out_i = 0;
+        double stereopos;
         totalread += framesread;
+
         //Do processing on frames here
         for(i = 0; i < inprops.chans*framesread; i++)
         {
+            stereopos = val_at_brktime(points, size, sampletime);
+            thispos = constpowerpan(stereopos); //TODO(Tanner): Document what simple_pan does again
             outframe[out_i++] = (float)(frame[i] * thispos.left);
             outframe[out_i++] = (float)(frame[i] * thispos.right);
+            sampletime += timeincr;
         }
 
         if(psf_sndWriteFloatFrames(ofd,outframe,framesread) != framesread   ) /* Write to our outfile in this line */
@@ -301,4 +365,83 @@ exit:
     Stereo Panning:
 
 
+    Breakpoints:
+    
+    Breakpoints are a simple format to describe a change over time, they 
+    are defined as follows
+
+    0.0 0.0
+    2.0 1.0
+    4.5 0.0
+
+    Where the left column is the time marker, and the right is the value,
+    these can be read in using functions from breakpoints.c and then used 
+    to linearly interpolated the wave between the two values to produce a 
+    change.
+
+    <Picture from page 230/257>
+
+    Say we want to know the value at a time that is not represented by a 
+    breakpoint value, we can use the following equations.
+
+    The breakpoint prior to the time we're looking for is our "left" time, and 
+    the breakpoint after is our "Right Time", wa can find a ration between the time
+
+    a = time - timeleft
+    b = timeright - timeleft 
+
+    ratio = a/b
+
+    We can apply this ratio to the span values to find the required value
+
+    c = valueright - valueleft // distance between 
+    target_distance = c * fraction
+    target_value = valueleft + target_distance
+
+    there are two special cases to consider:
+
+    1) Two spans have the same time, causing a divide by zero error. General
+    solution is to return the right-hand span valu
+
+    2) The requested time is after the final breakpoint, I.e the file is 10 seconds
+    long but breakpoints only go to the 5 second mark, in this case we just return the
+    final value for the rest of the file.
+
+    the function val_at_brktime in the breakpoints.c file performs this operation.
+
+    We simply need to calculate the time of each sample. The distance between samples
+    is constant and it is equal to the reciprocal of the sample rate.
+
+    double timeincr = 1.0 / inprops.srate;
+
+    and then we just need to incriment a sampletime variable by timeincr each sample
+    sampletime += timeincr;
+    
+    we can use this to get the breakpoint value
+
+    stereopos = get_val_brkpt(...);
+    
+    and then use this position to get the panning values
+
+    pos = sample_pan(stereopos);
+
+    With this method of panning, we may notice a couple of things:
+
+     - Sound tends to e pulled into the left or the right speaker.
+     - The sound seems to recede ( move away from the listener) when the input file
+       is panned centrally.
+     - The level seems to fall slightly when the sound is panned centrally.
+
+    This is because intensity (dB) is measured by reading the square of the amplitude,
+    if we want to find intensity of a pair of sources, we need to sum the square root
+    of the squares of the sum of each amplitude:
+
+    P = sqrt(pow(amp1, 2) + pow(amp2, 2))
+    in our original version of sfpan, this equation would not add up to 1.
+
+    <Insert picture of amplitude equation pg234/261>
+
+    To fix this, instead of a linearly interpolation we us a constant-power panning function
+    this function is constpower and replaces simple pan
+    <Picture of constant power function>
 */
