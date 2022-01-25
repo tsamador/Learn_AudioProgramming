@@ -7,9 +7,25 @@ enum {
     ARG_PROGNAME,
     ARG_INFILE,
     ARG_OUTFILE,
-    ARG_AMPFACE,
+    ARG_PANPOS,
     ARG_NARGS
 };
+
+typedef struct pan_position_t {
+    double left;
+    double right;
+} pan_position;
+
+pan_position simple_pan(double position)
+{
+    pan_position pos;
+
+    position *= 0.5;
+    pos.left = position - 0.5;
+    pos.right = position + 0.5;
+
+    return pos;
+}
 
 void print_file_properties(PSF_PROPS props, char* filename)
 {
@@ -46,7 +62,8 @@ but with a reduced amplitude
 */
 int main(int argc, char* argv[])
 {
-    PSF_PROPS props;
+    PSF_PROPS inprops, outprops;
+    pan_position thispos;
     long framesread, totalread;
 
     /* init all resource vars to default states */
@@ -56,25 +73,26 @@ int main(int argc, char* argv[])
     psf_format outformat = PSF_FMT_UNKNOWN;
     PSF_CHPEAK* peaks = NULL;
     float* frame = NULL;
+    float* outframe = NULL;
     float amplitude_factor, scalefac;
-    double dbval, inpeak = 0.0;
+    double pos, inpeak = 0.0;
 
     printf("\nSFGAIN: Change level of soundfile\n");
 
     if(argc < ARG_NARGS)
     {
-        printf("insufficient arguments. \nusage: ./sf2float <infile> <outfile> <dbval>\n");
+        printf("insufficient arguments. \nusage: ./sf2float <infile> <outfile> <panpos>\n");
         return 1;
     }
 
-    //Get Amplitude Factor from command line
-    dbval = atof(argv[3]);
-    if(dbval >= 0.0)
+    // Get the pan position from the command line
+    pos = (float) atof(argv[ARG_PANPOS]);
+    if(pos < -1.0 || pos > 1.0)
     {
-        printf("Error: decibal value must be positive\n");
-        return 1;
+        puts("Error: panpos value out of range -1 to +1\n");
+        error++;
+        goto exit;
     }
-    amplitude_factor = (float) pow(10.0, dbval/20.0);
 
     //Initialize the library
     if(psf_init())
@@ -84,7 +102,7 @@ int main(int argc, char* argv[])
     }
     
     //Open our infile
-    ifd = psf_sndOpen(argv[ARG_INFILE], &props, 0);
+    ifd = psf_sndOpen(argv[ARG_INFILE], &inprops, 0);
 
     if(ifd < 0 )
     {
@@ -92,50 +110,22 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    /* allocate space for sample buffer */
-    frame = (float*)malloc(FRAMES_PER_WRITE * (props.chans * sizeof(float))); // Buffer to hold our data for processing/writing
-
-    
-    //Find the peak value of our infile
-    if(psf_sndReadPeaks(ifd, peaks, NULL) > 0) // If our file has data for the peak values
+    if(inprops.chans != 1)
     {
-        long i;
-        for(i = 0; i < props.chans; i++)
-        {
-            if(peaks[i].val > inpeak)
-                inpeak = peaks[i].val;
-        }
-    }
-    else //Otherwise, find the peak value ourselves.
-    {
-        framesread = psf_sndReadFloatFrames(ifd, frame, FRAMES_PER_WRITE);
-        while(framesread > 0)
-        {
-            double thispeak;
-            int blocksize = props.chans * framesread;
-            thispeak = maxsamp(frame,blocksize);
-            if(thispeak > inpeak)
-            {
-                inpeak = thispeak;
-            }
-            framesread = psf_sndReadFloatFrames(ifd, frame, FRAMES_PER_WRITE);
-        }
-
-        /* Now rewind the file for copying */
-
-        if(psf_sndSeek(ifd, 0, PSF_SEEK_SET) < 0)
-        {
-            printf( "Error: unable to rewind infile\n");
-            error++;
-            goto exit;
-        }
-    }
-
-    if(inpeak == 0.0)
-    {
-        printf("infile is silent! Outfile not created. \n");
+        puts("Error: infile must be mono. \n");
+        error++;
         goto exit;
     }
+
+    outprops = inprops;
+    outprops.chans = 2;
+
+    /* allocate space for sample buffer */
+    frame = (float*)malloc(FRAMES_PER_WRITE * (inprops.chans * sizeof(float))); // Buffer to hold our data for processing/writing
+
+    /* allocate space for outframe */
+    outframe = (float*)malloc(FRAMES_PER_WRITE * (outprops.chans * sizeof(float)));
+
     /* check outfile extension is one we know about */
     outformat = psf_getFormatExt(argv[ARG_OUTFILE]);
 
@@ -145,8 +135,8 @@ int main(int argc, char* argv[])
         error++;
         goto exit;
     }
-    props.format = outformat;
-    ofd = psf_sndCreate(argv[2], &props, 0,0,PSF_CREATE_RDWR);
+    
+    ofd = psf_sndCreate(argv[2], &outprops, 0,0,PSF_CREATE_RDWR);
 
     if(ofd < 0)
     {
@@ -162,7 +152,7 @@ int main(int argc, char* argv[])
     }
 
     /* allocate space for PEAK info */
-    peaks = (PSF_CHPEAK*) malloc(props.chans* sizeof(PSF_CHPEAK));
+    peaks = (PSF_CHPEAK*) malloc(inprops.chans* sizeof(PSF_CHPEAK));
 
     if(peaks == NULL) {
         puts("No memory!\n");
@@ -177,38 +167,27 @@ int main(int argc, char* argv[])
     */
     framesread = psf_sndReadFloatFrames(ifd, frame, FRAMES_PER_WRITE);
     totalread = 0;
-    scalefac = (float)(amplitude_factor / inpeak);
-    while(framesread == FRAMES_PER_WRITE){
+    
+    thispos = simple_pan(pos);
 
-        /* Audio Programming Book Exercise 2.1.2
-        Add a progress meter to show that the copying is happning for large files.
-        */
-        if (totalread % (props.srate * 100) == 0)
-        {
-            printf("Copying to file... %ld samples copied\n", totalread);
-        }
-        totalread += FRAMES_PER_WRITE;
+    while(framesread > 0){
 
+        int out_i = 0;
+        totalread += framesread;
         //Do processing on frames here
-        for(i = 0; i < props.chans*FRAMES_PER_WRITE; i++)
+        for(i = 0; i < inprops.chans*framesread; i++)
         {
-            frame[i] *= scalefac;
+            outframe[out_i++] = (float)(frame[i] * thispos.left);
+            outframe[out_i++] = (float)(frame[i] * thispos.right);
         }
-        if(psf_sndWriteFloatFrames(ofd,frame,FRAMES_PER_WRITE) != FRAMES_PER_WRITE) /* Write to our outfile in this line */
+
+        if(psf_sndWriteFloatFrames(ofd,outframe,framesread) != framesread   ) /* Write to our outfile in this line */
         {
             puts("Error Writing to outfile \n");
             error++;
             break;
         }
         framesread = psf_sndReadFloatFrames(ifd,frame,FRAMES_PER_WRITE);
-    }
-    //If the samplerate is not divisible by the number of Frames we write, then we will have some leftover frames
-    //We need to add on after our main loop.
-    if(framesread > 0)
-    {
-        printf("Frames leftover %ld \n", framesread);
-        psf_sndWriteFloatFrames(ofd, frame, framesread);
-        totalread += framesread;
     }
 
     if(framesread < 0) {
@@ -218,21 +197,6 @@ int main(int argc, char* argv[])
     else
     {
         printf("Done. %ld sample frames copied to %s \n", totalread, argv[ARG_OUTFILE]);
-
-    }
-
-    /* Report PEAK values to user */
-    if(psf_sndReadPeaks(ofd, peaks,NULL) > 0){
-        long i;
-        double peaktime;
-        printf("PEAK information: \n");
-        for(i = 0; i < props.chans; i++) 
-        {
-            peaktime = (double) peaks[i].pos / props.srate;
-            printf("CH %ld: \t%.4f at %.4f secs\n", i+1, peaks[i].val, peaktime);
-        }
-
-    
     }
 
     /*do all the cleanup */
@@ -248,6 +212,10 @@ exit:
     if(frame)
     {
         free(frame);
+    }
+    if(outframe)
+    {
+        free(outframe);
     }
     if(peaks)
     {
