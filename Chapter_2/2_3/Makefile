@@ -1,4 +1,4 @@
 
-synes: sfpan.c
-	gcc sfpan.c -lportsf -lm -o sfpan -g
+synes: sfpan.c portsf/breakpoints.c
+	gcc sfpan.c portsf/breakpoints.c -lportsf -lm -o sfpan -g
 
