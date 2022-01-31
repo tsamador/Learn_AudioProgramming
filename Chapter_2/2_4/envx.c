@@ -4,87 +4,78 @@
 #include <math.h>
 #include "portsf/breakpoints.h"
 
+/* envx.c:
+extract amplitude envelope from mono soundfile */
+
 enum {
     ARG_PROGNAME,
     ARG_INFILE,
     ARG_OUTFILE,
-    ARG_BRKFILE,
     ARG_NARGS
 };
 
+typedef struct pan_position_t {
+    double left;
+    double right;
+} pan_position;
+
+
+#define FRAMES_PER_WRITE 1024
+#define DEFAULT_WINDOW_MSECS 15
+pan_position constpowerpan(double position);
+double maxsamp(float*buf, unsigned long blocksize);
 
 int main(int argc, char* argv[])
 {
     PSF_PROPS inprops;
     long framesread, totalread;
-
     /* init all resource vars to default states */
-    int ifd = -1, ofd = -1; /* input file and output file IDS */
+    int ifd = -1;  /* input file and output file IDS */
     int error = 0;
     int i;
-    psf_format outformat = PSF_FMT_UNKNOWN;
-    PSF_CHPEAK* peaks = NULL;
     float* frame = NULL;
-    float* outframe = NULL;
-    float amplitude_factor, scalefac;
-    double pos, inpeak = 0.0;
-
-    double timeincr, sampletime;
-
-
+    double win_duration = DEFAULT_WINDOW_MSECS; /*default of the window in msecs */
+    unsigned long winsize;
+    double break_time;
     FILE* fp = NULL;
-    unsigned long size;
-    breakpoint* points = NULL;
-    printf("\nSFPAN: Change level of soundfile\n");
+    unsigned long npoints = 0;
 
+    /* TODO: Add Description of program */
+    printf("\nenvcs: Extract enbelope information from a soundfile\n");
+
+    /* If the users specifies a particular window duration */
+
+    if(argc > 1) {
+        char flag; 
+        while(argv[1][0] == '-')
+        {
+            flag = argv[1][0];
+            switch(flag)
+            {
+                case '\0':
+                    printf("Error: missing flag name\n");
+                    return 1;
+                case 'w':
+                    win_duration = atof(&argv[1][2]);
+                    if(win_duration <= 0.0) {
+                        printf("bad value for window duration, must be positive\n");
+                        return 1;
+                    }
+                    break;
+                default:
+                    break;
+            }
+            argc--;
+            argv++;
+        }
+    }
     if(argc < ARG_NARGS)
     {
-        printf("insufficient arguments. \nusage: ./sf2float <infile> <outfile> <posfile.brk>\n");
+        printf("insufficient arguments. \nusage: ./envcs [-wN] <infile> <outfile.brk> \n"
+                "\t -wN set extraction window size to N msecs\n"
+                "           (default: 15)\n");
         return 1;
     }
-
-    //Read breakpoint file and verify it 
-    fp = fopen(argv[ARG_BRKFILE], "r");
-
-    if(fp == NULL) 
-    {
-        printf("error: unable to pen breakpoint file %s\n", argv[ARG_BRKFILE]);
-        error++;
-        goto exit;
-    }
-
-    points = get_breakpoints(fp, &size);
-
-    if(points == NULL)
-    {
-        printf("No breakpoints read. \n");
-        error++;
-        goto exit;
-    }  
-
-    if(size < 2) 
-    {
-        printf("Error: at least two breakpoints required\n");
-        free(points);
-        fclose(fp);
-        return 1;
-    }
-
-    //We require breakpoints to start from 0 */
-    if(points[0].time != 0.0) 
-    {
-        printf("error in breakpoint date, frist time must be 0.0\n");
-        error++;
-        goto exit;
-    }
-     if(!inrange(points, -1.0, 1.0, size))
-     {
-         printf("Error in breakpoint file, values out of range -1 to +1\n");
-         error++;
-         goto exit;
-     }
-
-
 
     //Initialize the library
     if(psf_init())
@@ -92,8 +83,8 @@ int main(int argc, char* argv[])
         puts("Unable to start up portsf\n");
         return 1;
     }
-    
-    //Open our infile
+
+    //TODO: Open and Verify Infile for this application
     ifd = psf_sndOpen(argv[ARG_INFILE], &inprops, 0);
 
     if(ifd < 0 )
@@ -102,40 +93,27 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    if(inprops.chans != 1)
+    if(inprops.chans > 1)
     {
-        puts("Error: infile must be mono. \n");
+        printf("soundfile contains %d channels: must be mono\n", inprops.chans);
+    }
+
+
+    /* Open the breakpoint file */
+    fp = fopen(argv[ARG_OUTFILE], "w");
+    if(fp == NULL)
+    {
+        printf("envx: unable to create breakpoint file %s\n", argv[ARG_OUTFILE]);
         error++;
         goto exit;
     }
 
-    outprops = inprops;
-    outprops.chans = 2;
+    /* set buffersize to the required envelope window size */
+    win_duration /= 1000.0; //Convert to seconds
+    winsize = (unsigned long)(win_duration * inprops.srate); /* Winsize is how many frames we are going to read at a time */
 
     /* allocate space for sample buffer */
-    frame = (float*)malloc(FRAMES_PER_WRITE * (inprops.chans * sizeof(float))); // Buffer to hold our data for processing/writing
-
-    /* allocate space for outframe */
-    outframe = (float*)malloc(FRAMES_PER_WRITE * (outprops.chans * sizeof(float)));
-
-    /* check outfile extension is one we know about */
-    outformat = psf_getFormatExt(argv[ARG_OUTFILE]);
-
-    if(outformat == PSF_FMT_UNKNOWN)
-    {
-        printf("outfile name %s has unknown format. \n Use any of .wav .aiff. .aif .afc .aifc\n", argv[ARG_OUTFILE]);
-        error++;
-        goto exit;
-    }
-    
-    ofd = psf_sndCreate(argv[2], &outprops, 0,0,PSF_CREATE_RDWR);
-
-    if(ofd < 0)
-    {
-        printf("Error: unable to create outfile %s\n", argv[ARG_OUTFILE]);
-        error++;
-        goto exit;
-    }
+    frame = (float*)malloc(winsize*sizeof(float)); // Buffer to hold our data for processing/writing
 
     if(frame == NULL) {
         puts("No memory!\n");
@@ -143,58 +121,26 @@ int main(int argc, char* argv[])
         goto exit;
     }
 
-    /* allocate space for PEAK info */
-    peaks = (PSF_CHPEAK*) malloc(inprops.chans* sizeof(PSF_CHPEAK));
-
-    if(peaks == NULL) {
-        puts("No memory!\n");
-        error++;
-        goto exit;
-    }
-
-    puts("copying... \n");
-    
-    /* Audio Programming book, Exercise 2.1.1
-    modify this program to use multiple frames instead of doing one frame at a time 
-    */
-    framesread = psf_sndReadFloatFrames(ifd, frame, FRAMES_PER_WRITE);
-    totalread = 0;
-
-    timeincr = 1.0 / inprops.srate;
-    sampletime = 0.0;
-
-    while(framesread > 0){
-
-        int out_i = 0;
-        double stereopos;
-        totalread += framesread;
-
-        //Do processing on frames here
-        for(i = 0; i < inprops.chans*framesread; i++)
+    break_time = 0.0;
+    npoints = 0;
+    while((framesread = psf_sndReadFloatFrames(ifd, frame, winsize)) > 0)
+    {
+        double amp; 
+        amp = maxsamp(frame, framesread);
+        if(fprintf(fp, "%f\t%f", break_time, amp) < 2)
         {
-            stereopos = val_at_brktime(points, size, sampletime);
-            thispos = constpowerpan(stereopos); //TODO(Tanner): Document what simple_pan does again
-            outframe[out_i++] = (float)(frame[i] * thispos.left);
-            outframe[out_i++] = (float)(frame[i] * thispos.right);
-            sampletime += timeincr;
-        }
-
-        if(psf_sndWriteFloatFrames(ofd,outframe,framesread) != framesread   ) /* Write to our outfile in this line */
-        {
-            puts("Error Writing to outfile \n");
+            printf("Failed to write to breakpoint file");
             error++;
             break;
         }
-        framesread = psf_sndReadFloatFrames(ifd,frame,FRAMES_PER_WRITE);
-    }
-
-    if(framesread < 0) {
-        printf("Error reading infile. Outfile is incomplete. \n");
-        error++;
-    }
-    else
+        npoints++;
+        break_time += win_duration;
+    }    
+    
+    if(framesread < 0)
     {
-        printf("Done. %ld sample frames copied to %s \n", totalread, argv[ARG_OUTFILE]);
+        printf("error reading infile. Outfile is incomplete.\n");
+        error++;
     }
 
     /*do all the cleanup */
@@ -203,24 +149,78 @@ exit:
     {
         psf_sndClose(ifd);
     }
-    if(ofd >= 0)
-    {
-        psf_sndClose(ofd);
-    }
     if(frame)
     {
         free(frame);
     }
-    if(outframe)
+    
+    if(fp)
     {
-        free(outframe);
-    }
-    if(peaks)
-    {
-        free(peaks);
+        if(fclose(fp))
+        {
+            printf("envx: failed to close output file %s\n"
+                    , argv[ARG_OUTFILE]);
+        }
     }
 
     //Clean up the library
     psf_finish();
     return error;
 }
+
+pan_position constpowerpan(double position)
+{
+    pan_position pos;
+    /* pi/2: 1/4 cycle of a sinusoid */
+    const double piover2 = 4.0 * atan(1.0) * 0.5;
+    const double root2over2 = sqrt(2.0) * 0.5;
+
+    /* scale position to fit the pi/2 range */
+    double thispos = position * piover2;
+
+    /* each channel uses a 1.4 of a cycle */
+    double angle = thispos * 0.5;
+
+    pos.left = root2over2 * (cos(angle) - sin(angle));
+    pos.right = root2over2 * (cos(angle) + sin(angle));
+    return pos;
+}
+
+void print_file_properties(PSF_PROPS props, char* filename)
+{
+    printf("Config info for %s\n", filename);
+    printf("Num of channels %d\n", props.chans);
+    /* TODO(Tanner): Change these to print correct enum */
+    printf("Channel Format %d\n", props.chformat);
+    printf("Format %d\n", props.format);
+    printf("Sample Type %d \n", props.samptype);
+    printf("Sample Rate %d \n", props.srate);
+}
+
+/* Finds the max sample value in a buffer */
+double maxsamp(float*buf, unsigned long blocksize)
+{
+    double absval, peak = 0.0;
+    unsigned long i;
+
+    for(i = 0; i < blocksize; i++)
+    {
+        absval = fabs(buf[i]);
+        if(absval > peak)
+            peak = absval;
+    }
+    return peak;
+}
+
+/*  Notes
+
+We are trying to extract "envelope" data, which is essentially
+a representation of how the waveform changes over time (Breakpoint file)
+
+We want to try to minimize the data we collect, if we collect too much 
+we end up just reproducing the waveform itself, if we collect too little
+we may corrupt the waveform.
+
+As a rule of thumb, a 15 millisecond window is sufficient to capture the 
+envelope of most souds - around 66 points per second 
+*/

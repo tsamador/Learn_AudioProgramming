@@ -134,10 +134,12 @@ int inrange(const breakpoint* points, double minval, double maxval, unsigned lon
     return range_OK;
 }
 
+breakpoint left, right;
+unsigned long ileft, iright;
+
 double val_at_brktime(const breakpoint* points, unsigned long npoints, double time )
 {
     unsigned long i;
-    breakpoint left, right;
     double frac, val, width;
 
     /* scan until we find a span containing out time */

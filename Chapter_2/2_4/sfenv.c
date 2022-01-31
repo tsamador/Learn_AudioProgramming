@@ -4,6 +4,13 @@
 #include <math.h>
 #include "portsf/breakpoints.h"
 
+
+/*
+sfenv.c 
+
+Goal is to apply an amplitude evelope defined in a breakpoint
+file to a source soundfile.
+*/
 enum {
     ARG_PROGNAME,
     ARG_INFILE,
@@ -98,11 +105,16 @@ int main(int argc, char* argv[])
 
     double timeincr, sampletime;
 
+    /* Variables for Break Point processing */
+    breakpoint leftpoint, rightpoint;
+    unsigned long ileft = 0 , iright = 1;
+    double incr, curpos, frac, width, height; 
+    int more_points = 1;
 
     FILE* fp = NULL;
     unsigned long size;
     breakpoint* points = NULL;
-    printf("\nSFPAN: Change level of soundfile\n");
+    printf("\nSFENV: Change level of soundfile\n");
 
     if(argc < ARG_NARGS)
     {
@@ -229,6 +241,13 @@ int main(int argc, char* argv[])
 
     timeincr = 1.0 / inprops.srate;
     sampletime = 0.0;
+    ileft = 0;
+    iright = 1;
+    leftpoint = points[ileft];
+    rightpoint = points[iright];
+    width = rightpoint.time - leftpoint.time;
+    height = rightpoint.value - leftpoint.value;
+    more_points = 1;
 
     while(framesread > 0){
 
@@ -239,6 +258,7 @@ int main(int argc, char* argv[])
         //Do processing on frames here
         for(i = 0; i < inprops.chans*framesread; i++)
         {
+            // 2_4 Deals with improving the runtime of this function
             stereopos = val_at_brktime(points, size, sampletime);
             thispos = constpowerpan(stereopos); //TODO(Tanner): Document what simple_pan does again
             outframe[out_i++] = (float)(frame[i] * thispos.left);

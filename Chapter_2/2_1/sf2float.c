@@ -25,8 +25,6 @@ int main(int argc, char* argv[])
     PSF_CHPEAK* peaks = NULL;
     float* frame = NULL;
 
-    printf("SF2FLOAT: convert soundfile to floats format\n");
-
     if(argc < ARG_NARGS)
     {
         printf("insufficient arguments. \nusage: ./sf2float <infile> <outfile> \n");
@@ -49,11 +47,13 @@ int main(int argc, char* argv[])
         return 1;
     }
 
+
     /* We now have a resource, so want to use our error  */
     if(props.samptype == PSF_SAMP_IEEE_FLOAT)
     {
         printf("Info: infile is already in floats format \n");
     }
+    
     props.samptype = PSF_SAMP_IEEE_FLOAT;
 
     /* check outfile extension is one we know about */
