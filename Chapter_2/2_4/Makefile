@@ -4,3 +4,4 @@ synes: envx.c portsf/breakpoints.c
 
 sfenv: sfenv.c portsf/breakpoints.c
 	gcc sfenv.c portsf/breakpoints.c -lportsf -lm -o sfenv -g
+

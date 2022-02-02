@@ -137,6 +137,11 @@ int inrange(const breakpoint* points, double minval, double maxval, unsigned lon
 breakpoint left, right;
 unsigned long ileft, iright;
 
+
+/*
+TODO(Tanner): optimize this function 
+
+*/
 double val_at_brktime(const breakpoint* points, unsigned long npoints, double time )
 {
     unsigned long i;
