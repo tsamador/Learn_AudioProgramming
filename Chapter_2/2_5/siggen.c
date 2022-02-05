@@ -27,12 +27,18 @@ OTHER DEALINGS IN THE SOFTWARE.
 #include <math.h>
 #include <portsf.h>
 #include "wave.h"
+#include "portsf/breakpoints.h"
 
 /* set size of multi-channel frame-buffer */
 #define NFRAMES (1024)
 
 /* TODO define program argument list, excluding flags */
-enum {ARG_PROGNAME, ARG_OUTFILE, ARG_DUR, ARG_SRATE, ARG_AMP, ARG_FREQ,ARG_NARGS};
+enum {ARG_PROGNAME, ARG_OUTFILE, ARG_TYPE, ARG_DUR, ARG_SRATE, ARG_AMP, ARG_FREQ,ARG_NARGS};
+
+enum {WAVE_SINE, WAVE_TRIANGLE, WAVE_SQUARE, WAVE_SAWUP, WAVE_SAWDOWN, WAVE_NTYPES};
+
+/*Function pointer to the correct tick function */
+typedef double (*tickfunc)(OSCIL* osc, double freq);
 
 int main(int argc, char* argv[])
 {
@@ -52,12 +58,25 @@ int main(int argc, char* argv[])
     int sample_rate;
     double duration, amplitude, frequency;
     OSCIL* osc;
+	int wave_type;
+	tickfunc tick;
+
+	/* BreakPoint stream for amplitude */
+	break_stream* ampstream = NULL;
+	FILE* amplitude_file = NULL;
+	unsigned long break_amp_size = 0;
+	double minval, maxval;
+
+	/* Breakpoint stream for frequency */
+
+	break_stream* freqstream = NULL;
+	FILE* frequency_file = NULL;
+	unsigned long break_freq_size = 0;
 
 
 	/* TODO: define an output frame buffer if channel width different 	*/
 	
 /* STAGE 2 */	
-	printf("MAIN: generic process\n");						
 
 	/* process any optional flags: remove this block if none used! */
 	if(argc > 1){
@@ -81,7 +100,14 @@ int main(int argc, char* argv[])
 	if(argc < ARG_NARGS){
 		printf("insufficient arguments.\n"
 			/* TODO: add required usage message */
-			"usage: siggen outfile duration samplerate amplitude frequency\n"
+			"usage: siggen outfile wavetype duration(s) samplerate amplitude frequency\n"
+            " \t Where wavetype = \n"
+            " \t    0 = Sine Wave\n"
+            " \t    1 = Triangle Wave\n"
+            " \t    2 = Square Wave\n"
+            " \t    3 = Sawtooth Up Wave\n"
+			" \t    4 = Sawtooth Down Wave\n"
+			" \t amplitude can either be a constant or filename of a breakpoint file\n"
 			);
 		return 1;
 	}
@@ -94,6 +120,13 @@ int main(int argc, char* argv[])
         return 1;
     }
 
+	wave_type = atoi(argv[ARG_TYPE]);
+	if(wave_type < WAVE_SINE || wave_type >= WAVE_NTYPES)
+	{
+		puts("Invalid option for wave type");
+		return 1;
+	}
+
     sample_rate = atoi(argv[ARG_SRATE]);
     if( sample_rate < 0)
     {
@@ -101,20 +134,68 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    amplitude = atof(argv[ARG_AMP]);
-    if(amplitude < 0.0)
-    {
-        puts("Amplitude must be positive");
-        return 1;
-    }
+	/* basically, instead of doing complicated command line arguments,
+	assume the user entered a breakpoint file, if it fails to open
+	then treat it like a number */
+	amplitude_file = fopen(argv[ARG_AMP], "r");
+	if(!amplitude_file)
+	{
+		amplitude = atof(argv[ARG_AMP]);
+    	if(amplitude < 0.0 || amplitude > 1.0)
+    	{
+        	puts("Amplitude must be positive");
+        	return 1;
+    	}
+	}
+	else
+	{
+		ampstream = new_breakpoint_stream(amplitude_file, sample_rate, &break_amp_size);
 
-    frequency = atof (argv[ARG_FREQ]);
-    if(frequency < 0.0)
-    {
-        puts("frequency must be positve");
-        return 1;
-    }
+		if(!bps_getminmax(ampstream, &minval, &maxval))
+		{
+			printf("Error finding minimum and maximum values in breakpoint file %s", argv[ARG_AMP]);
+			error++;
+			goto exit;
+		}
 
+		if(minval < 0.0 || minval > 1.0 || maxval < 0.0 || maxval >1.0)
+		{
+			puts("Error: amplitude value out of range");
+			error++;
+			goto exit;
+		}
+	}
+    
+	/* Do the same for frequency */
+	frequency_file = fopen(argv[ARG_FREQ], "r");
+	if(!frequency_file)
+	{
+		frequency = atof(argv[ARG_FREQ]);
+    	if(frequency < 0.0 )
+    	{
+        	puts("Frequency must be positive");
+        	return 1;
+    	}
+	}
+	else
+	{
+		freqstream = new_breakpoint_stream(frequency_file, sample_rate, &break_freq_size);
+
+		if(!bps_getminmax(freqstream, &minval, &maxval))
+		{
+			printf("Error finding minimum and maximum values in breakpoint file %s", argv[ARG_AMP]);
+			error++;
+			goto exit;
+		}
+
+		if(minval < 0.0 || maxval < 0.0)
+		{
+			puts("Error: frequency value out of range");
+			error++;
+			goto exit;
+		}
+	}
+    
     // fill out our outfiles properties.
     outprops.srate = sample_rate;
     outprops.chans = 1;
@@ -181,26 +262,67 @@ int main(int argc, char* argv[])
 	}
     osc = oscil();
     InitOscillator(osc, sample_rate);
-    
+
+	switch (wave_type)
+	{
+		case WAVE_SINE:
+		{
+			tick = sine_tick;
+		}
+		break;
+		case WAVE_TRIANGLE:
+		{
+			tick = triangle_tick;
+		}
+		break;
+		case WAVE_SQUARE:
+		{
+			tick = square_tick;
+		}
+		break;
+		case WAVE_SAWUP:
+		{
+			tick = saw_upward_tick;
+		}
+		break;
+		case WAVE_SAWDOWN:
+		{
+			tick = saw_downward_tick;
+		}
+		break;
+	}
+
 /* STAGE 5 */	
 	printf("processing....\n");								
 	/* TODO: init any loop-related variables */
 	for(i = 0; i < nbufs; i++)
     {
-        if(i==nbufs-1)
+        if(i == nbufs-1)
         {
             nframes = remainder;
         }
 
         for( j = 0; j < nframes;j++)
         {
-            outframe[j] = (float) (amplitude * sine_tick(osc, frequency));
-            if(psf_sndWriteFloatFrames(ofd, outframe, nframes)!= nframes)
-            {
-                puts("Error writing to outfile\n");
-                error++;
-                break;
-            }
+			if(ampstream)
+			{
+				amplitude = breakpoints_stream_tick(ampstream);
+				printf("Current amplitude value: %f \n", amplitude);
+			}
+			
+			if(freqstream)
+			{
+				frequency = breakpoints_stream_tick(freqstream);
+				printf("Current Frequency value: %f", frequency);
+			}
+			outframe[j] = (float)(amplitude * tick(osc, frequency));
+        }
+
+        if(psf_sndWriteFloatFrames(ofd, outframe, nframes)!= nframes)
+        {
+            puts("Error writing to outfile\n");
+            error++;
+            break;
         }
     }
 
@@ -233,6 +355,16 @@ exit:
 		free(inframe);
 	if(peaks)
 		free(peaks);
+	if(ampstream)
+	{
+		bps_freepoints(ampstream);
+		free(ampstream);
+	}
+	if(amplitude_file)
+	{
+		if(fclose(amplitude_file))
+			puts("Error closing breakpoint file");
+	}
 	/*TODO: cleanup any other resources */
 
 	psf_finish();

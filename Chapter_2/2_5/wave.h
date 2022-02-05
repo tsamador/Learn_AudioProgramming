@@ -22,5 +22,10 @@ typedef struct t_oscil
 OSCIL* oscil();
 void InitOscillator(OSCIL* osc, unsigned long sample_rate);
 double sine_tick(OSCIL* osc, double freq);
+double square_tick(OSCIL* osc, double freq);
+double saw_downward_tick(OSCIL* osc, double freq);
+double saw_upward_tick(OSCIL* osc, double freq);
+double triangle_tick(OSCIL* osc, double freq);
+
 
 #endif
